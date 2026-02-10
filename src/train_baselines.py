@@ -152,10 +152,8 @@ def train_xgboost(fold=0, max_features=50000, n_estimators=1000):
     
     print(f"✅ TF-IDF matrix: {X_train.shape}")
     
-    # Check GPU availability
-    use_gpu = torch.cuda.is_available()
-    
-    print(f"\n[3/5] Training XGBoost (GPU={'enabled' if use_gpu else 'disabled'})...")
+    # Use CPU for XGBoost (GPU needs >9GB VRAM for 50k TF-IDF features)
+    print(f"\n[3/5] Training XGBoost (CPU mode - GPU needs >9GB for TF-IDF)...")
     
     # Configure parameters
     xgb_params = {
@@ -163,16 +161,11 @@ def train_xgboost(fold=0, max_features=50000, n_estimators=1000):
         'objective': 'reg:absoluteerror',
         'learning_rate': 0.01,
         'max_depth': 6,
+        'tree_method': 'hist',  # CPU mode
+        'n_jobs': -1,  # Use all CPU cores
         'random_state': 42,
         'verbosity': 0
     }
-    
-    if use_gpu:
-        xgb_params['tree_method'] = 'gpu_hist'
-        xgb_params['gpu_id'] = 0
-        print("  Using GPU acceleration (tree_method='gpu_hist')")
-    else:
-        xgb_params['tree_method'] = 'hist'
     
     model = XGBRegressor(**xgb_params)
     model.fit(

@@ -67,10 +67,6 @@ def main():
     else:
         print("✓ Processed data already exists. Skipping preprocessing.")
     
-    # Phase 2.5: Clean old MSE-trained models
-    print_banner("PHASE 2.5: CLEANING OLD MODELS")
-    clean_old_models()
-    
     # Phase 3: Train DeBERTa Fold 0 (with L1Loss + AMP)
     print_banner("PHASE 3: TRAINING DeBERTa FOLD 0 (L1Loss + AMP)")
     if not os.path.exists('models/deberta_fold0.pth'):
