@@ -69,11 +69,15 @@ def extract_features(df):
     # Ellipsis (suspense/trailing)
     df['ellipsis_count'] = (df['title'].str.count(r'\.\.\.') + df['body'].str.count(r'\.\.\.')).astype(int)
     
+    # ID type feature (CRITICAL for segmented ensemble)
+    df['is_numeric_id'] = df['id'].apply(lambda x: 1 if str(x).isdigit() else 0)
+    
     print("✅ Features extracted:")
     print(f"  - Length features: title_len, body_len, word counts (8)")
     print(f"  - Punctuation: question marks, exclamation marks (6)")
     print(f"  - Capitalization: upper_ratio, caps_words (2)")
     print(f"  - Content markers: AITA, edit, update, tldr, ellipsis (5)")
+    print(f"  - ID type: is_numeric_id (1) — CRITICAL for segmentation")
     
     return df
 
@@ -173,7 +177,7 @@ def get_feature_columns():
         'total_question_marks', 'total_exclamation_marks',
         'title_upper_ratio', 'title_caps_words',
         'title_starts_with_aita', 'has_edit', 'has_update', 'has_tldr',
-        'ellipsis_count'
+        'ellipsis_count', 'is_numeric_id'
     ]
 
 

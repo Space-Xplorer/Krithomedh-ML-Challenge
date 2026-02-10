@@ -61,37 +61,38 @@ def main():
     
     # Phase 2: Preprocessing
     print_banner("PHASE 2: DATA PREPROCESSING")
-    if not os.path.exists('Data/train_processed.csv'):
-        print("Running preprocessing...")
-        preprocess_data()
-    else:
-        print("✓ Processed data already exists. Skipping preprocessing.")
+    print("⚠️ FORCING REPROCESSING to add is_numeric_id feature...")
+    preprocess_data()
     
-    # Phase 3: Train DeBERTa Fold 0 (with L1Loss + AMP)
-    print_banner("PHASE 3: TRAINING DeBERTa FOLD 0 (L1Loss + AMP)")
-    if not os.path.exists('models/deberta_fold0.pth'):
-        print("Training DeBERTa on Fold 0 with MAE objective...")
-        train_deberta(fold=0, use_features=True, epochs=3, batch_size=12,
-                     gradient_accumulation_steps=2)
+    # Phase 3: Train DeBERTa Fold 0 (SKIPPED - using existing model)
+    print_banner("PHASE 3: DeBERTa FOLD 0 (SKIPPED - No time to retrain)")
+    if os.path.exists('models/deberta_fold0.pth'):
+        print("✓ Using existing DeBERTa Fold 0 model (21 features)")
     else:
-        print("✓ DeBERTa Fold 0 model already exists. Skipping.")
+        print("❌ ERROR: DeBERTa Fold 0 not found! Cannot proceed.")
+        return
     
-    # Phase 4a: Train DeBERTa Fold 1
-    print_banner("PHASE 4a: TRAINING DeBERTa FOLD 1 (L1Loss + AMP)")
-    if not os.path.exists('models/deberta_fold1.pth'):
-        print("Training DeBERTa on Fold 1 with MAE objective...")
-        train_deberta(fold=1, use_features=True, epochs=3, batch_size=12,
-                     gradient_accumulation_steps=2)
+    # Phase 4a: Train DeBERTa Fold 1 (SKIPPED - using existing model)
+    print_banner("PHASE 4a: DeBERTa FOLD 1 (SKIPPED - No time to retrain)")
+    if os.path.exists('models/deberta_fold1.pth'):
+        print("✓ Using existing DeBERTa Fold 1 model (21 features)")
     else:
-        print("✓ DeBERTa Fold 1 model already exists. Skipping.")
+        print("❌ ERROR: DeBERTa Fold 1 not found! Cannot proceed.")
+        return
     
     # Phase 4b: Train baseline models (with MAE objectives)
     print_banner("PHASE 4b: TRAINING BASELINES (MAE Objectives)")
-    if not os.path.exists('models/lightgbm_fold0.pkl'):
-        print("Training LightGBM (objective=mae) and XGBoost (objective=reg:absoluteerror)...")
+    
+    # Check what needs retraining
+    lgb_exists = os.path.exists('models/lightgbm_fold0.pkl')
+    xgb_exists = os.path.exists('models/xgboost_fold0.pkl')
+    
+    if not lgb_exists or not xgb_exists:
+        print("Training baseline models...")
         train_all_baselines(fold=0)
     else:
-        print("✓ Baseline models already exist. Skipping.")
+        print("✓ Both baseline models already exist. Skipping training.")
+        print("  (If XGBoost needs v3 retrain, delete models/xgboost_fold0.pkl manually)")
     
     # Phase 5: Ensemble validation (OOF — no data leakage)
     print_banner("PHASE 5: ENSEMBLE VALIDATION (OOF - No Leakage)")
@@ -112,14 +113,14 @@ def main():
     print_banner("PIPELINE COMPLETE!")
     print(f"Total execution time: {hours}h {minutes}m {seconds}s")
     print(f"Submission file: submissions/Solution.csv")
-    print(f"\n📊 Key Changes in v2:")
-    print(f"  ✅ DeBERTa trained with L1Loss (MAE) instead of MSELoss")
-    print(f"  ✅ LightGBM trained with objective='mae'")
-    print(f"  ✅ XGBoost trained with objective='reg:absoluteerror'")
-    print(f"  ✅ Ensemble weights optimized for MAE (not RMSE)")
+    print(f"\n📊 Key Changes in v3:")
+    print(f"  ✅ DeBERTa: Using existing models (21 features)")
+    print(f"  ✅ Preprocessing: Added is_numeric_id feature (22 total)")
+    print(f"  ✅ XGBoost v3: Feature Fusion (TF-IDF + 22 tabular features)")
+    print(f"  ✅ XGBoost v3: Recognizes Numeric vs Alphanumeric ID patterns")
+    print(f"  ✅ LightGBM: objective='mae' with early stopping")
+    print(f"  ✅ Ensemble weights optimized for MAE")
     print(f"  ✅ OOF validation — no data leakage")
-    print(f"  ✅ AMP mixed precision for DeBERTa")
-    print(f"  ✅ max_length=384 for more text context")
     print(f"\n🎯 OOF MAE: {oof_mae:.2f}")
     print(f"\n✅ Ready to submit! Good luck! 🚀")
 

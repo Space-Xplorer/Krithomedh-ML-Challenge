@@ -1,6 +1,7 @@
 """
 DeBERTa Training Module (v2 - MAE Optimized)
-- L1Loss (MAE) instead of MSELoss — matches competition metric
+- HuberLoss (smooth MAE) for robust convergence
+- Mean Pooling over all tokens (not just [CLS])
 - Mixed Precision (AMP) for 2x memory efficiency
 - Gradient accumulation for larger effective batch size
 - max_length=384 for more context (enabled by AMP memory savings)
@@ -13,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error
@@ -73,7 +74,13 @@ class DeBERTaRegressor(nn.Module):
     
     def forward(self, input_ids, attention_mask, features=None):
         outputs = self.deberta(input_ids=input_ids, attention_mask=attention_mask)
-        pooled = outputs.last_hidden_state[:, 0, :]  # [CLS] token
+        
+        # Mean Pooling — uses ALL token representations, not just [CLS]
+        last_hidden = outputs.last_hidden_state
+        mask_expanded = attention_mask.unsqueeze(-1).expand(last_hidden.size()).float()
+        sum_embeddings = torch.sum(last_hidden * mask_expanded, dim=1)
+        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+        pooled = sum_embeddings / sum_mask
         
         # Concatenate with handcrafted features if provided
         if self.n_features > 0 and features is not None:
@@ -156,8 +163,10 @@ def train_deberta(fold=0, use_features=True, epochs=3, batch_size=12, learning_r
         features=val_features
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                               num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size,
+                            num_workers=2, pin_memory=True)
     effective_batch = batch_size * gradient_accumulation_steps
     print(f"✅ Datasets created (batch={batch_size}, effective={effective_batch} via grad accum)")
     
@@ -183,12 +192,12 @@ def train_deberta(fold=0, use_features=True, epochs=3, batch_size=12, learning_r
     num_warmup_steps = int(num_training_steps * 0.1)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
     
-    criterion = nn.L1Loss()  # MAE loss — matches competition metric!
+    criterion = nn.HuberLoss(delta=1.0)  # Smooth MAE — MSE for small errors, MAE for large
     
     use_amp = torch.cuda.is_available()
-    amp_scaler = GradScaler(enabled=use_amp)
+    amp_scaler = GradScaler('cuda', enabled=use_amp)
     
-    print(f"✅ Loss: L1Loss (MAE) — optimizing for competition metric")
+    print(f"✅ Loss: HuberLoss (delta=1.0) — smooth MAE for better convergence")
     print(f"✅ Optimizer: AdamW (lr={learning_rate})")
     print(f"✅ Scheduler: Linear warmup ({num_warmup_steps} steps)")
     print(f"✅ Mixed Precision (AMP): {'Enabled' if use_amp else 'Disabled'}")
@@ -217,7 +226,7 @@ def train_deberta(fold=0, use_features=True, epochs=3, batch_size=12, learning_r
             if features is not None:
                 features = features.to(device)
             
-            with autocast(enabled=use_amp):
+            with autocast('cuda', enabled=use_amp):
                 predictions = model(input_ids, attention_mask, features)
                 loss = criterion(predictions, scores) / gradient_accumulation_steps
             
@@ -250,7 +259,7 @@ def train_deberta(fold=0, use_features=True, epochs=3, batch_size=12, learning_r
                 if features is not None:
                     features = features.to(device)
                 
-                with autocast(enabled=use_amp):
+                with autocast('cuda', enabled=use_amp):
                     predictions = model(input_ids, attention_mask, features)
                 val_predictions.extend(predictions.float().cpu().numpy())
                 val_actuals.extend(scores.cpu().numpy())

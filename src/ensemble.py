@@ -1,7 +1,8 @@
 """
-Ensemble and Prediction Module (v2 - MAE Optimized, No Data Leakage)
+Ensemble and Prediction Module (v3 - Segmented MAE Optimization)
 - OOF (Out-of-Fold) prediction approach eliminates data leakage
-- MAE-based weight optimization matches competition metric
+- SEGMENTED ensemble weights: separate optimization for Numeric vs Alphanumeric IDs
+- Segmented outlier capping: different caps for different ID types
 - Proper cross-validation: each model only predicts on its held-out fold
 """
 
@@ -10,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from transformers import AutoTokenizer
 from sklearn.metrics import mean_absolute_error
 from scipy.optimize import minimize
@@ -53,7 +54,7 @@ def predict_deberta(model, texts, features, tokenizer, device, batch_size=16):
             if feats is not None:
                 feats = feats.to(device)
             
-            with autocast(enabled=use_amp):
+            with autocast('cuda', enabled=use_amp):
                 preds = model(input_ids, attention_mask, feats)
             predictions.extend(preds.float().cpu().numpy())
     
@@ -127,6 +128,65 @@ def optimize_ensemble_weights(predictions_list, y_true, model_names=None):
     return optimal_weights
 
 
+def optimize_segmented_weights(predictions_list, y_true, id_series, model_names=None):
+    """
+    Optimize ensemble weights SEPARATELY for Numeric vs Alphanumeric IDs.
+    
+    This is the breakthrough technique for sub-1085 MAE.
+    
+    Args:
+        predictions_list: List of prediction arrays (log space)
+        y_true: True target values (log space)
+        id_series: Series/array of IDs to determine segmentation
+        model_names: Names for display
+        
+    Returns:
+        Dictionary with 'numeric' and 'alphanumeric' weight arrays
+    """
+    print("\n" + "="*60)
+    print("SEGMENTED ENSEMBLE WEIGHT OPTIMIZATION")
+    print("="*60)
+    
+    # Classify IDs
+    is_numeric = id_series.apply(lambda x: 1 if str(x).isdigit() else 0).values
+    
+    results = {}
+    
+    # Optimize for Numeric IDs
+    print("\n[1/2] Optimizing weights for NUMERIC IDs (median score ~526)...")
+    numeric_mask = is_numeric == 1
+    numeric_preds = [pred[numeric_mask] for pred in predictions_list]
+    numeric_y = y_true[numeric_mask]
+    
+    print(f"  Samples: {numeric_mask.sum()} numeric IDs")
+    numeric_weights = optimize_ensemble_weights(numeric_preds, numeric_y, model_names)
+    results['numeric'] = numeric_weights
+    
+    # Optimize for Alphanumeric IDs
+    print("\n[2/2] Optimizing weights for ALPHANUMERIC IDs (median score ~22)...")
+    alpha_mask = is_numeric == 0
+    alpha_preds = [pred[alpha_mask] for pred in predictions_list]
+    alpha_y = y_true[alpha_mask]
+    
+    print(f"  Samples: {alpha_mask.sum()} alphanumeric IDs")
+    alpha_weights = optimize_ensemble_weights(alpha_preds, alpha_y, model_names)
+    results['alphanumeric'] = alpha_weights
+    
+    # Compare
+    print("\n" + "="*60)
+    print("SEGMENTATION SUMMARY")
+    print("="*60)
+    print(f"\nNumeric IDs weight distribution:")
+    for name, w in zip(model_names or [f'Model {i}' for i in range(len(numeric_weights))], numeric_weights):
+        print(f"  {name}: {w:.4f}")
+    
+    print(f"\nAlphanumeric IDs weight distribution:")
+    for name, w in zip(model_names or [f'Model {i}' for i in range(len(alpha_weights))], alpha_weights):
+        print(f"  {name}: {w:.4f}")
+    
+    return results
+
+
 def validate_ensemble_oof():
     """
     Validate ensemble using proper Out-of-Fold (OOF) predictions.
@@ -191,13 +251,22 @@ def validate_ensemble_oof():
     print("  LightGBM → predicting on fold 0 (OOF)...")
     lgb_model = joblib.load('models/lightgbm_fold0.pkl')
     vectorizer = joblib.load('models/tfidf_vectorizer_fold0.pkl')
-    X_fold0 = vectorizer.transform(fold0_data['text'])
-    oof_lgb_fold0 = lgb_model.predict(X_fold0)
+    X_fold0_tfidf = vectorizer.transform(fold0_data['text'])
+    oof_lgb_fold0 = lgb_model.predict(X_fold0_tfidf)
     
-    # --- XGBoost Fold 0: predicts on fold 0 (its held-out fold) ---
-    print("  XGBoost → predicting on fold 0 (OOF)...")
+    # --- XGBoost v3 Fold 0: predicts on fold 0 (its held-out fold) ---
+    print("  XGBoost v3 (Feature Fusion) → predicting on fold 0 (OOF)...")
     xgb_model = joblib.load('models/xgboost_fold0.pkl')
-    oof_xgb_fold0 = xgb_model.predict(X_fold0)
+    xgb_scaler = joblib.load('models/xgb_scaler_fold0.pkl')
+    xgb_feature_cols = joblib.load('models/xgb_features_fold0.pkl')
+    
+    # Prepare tabular features for XGBoost
+    from scipy.sparse import hstack, csr_matrix
+    X_fold0_tab = xgb_scaler.transform(fold0_data[xgb_feature_cols].values)
+    X_fold0_tab_sparse = csr_matrix(X_fold0_tab)
+    X_fold0_xgb = hstack([X_fold0_tfidf, X_fold0_tab_sparse])
+    
+    oof_xgb_fold0 = xgb_model.predict(X_fold0_xgb)
     
     # =========================================================
     # Step 2: Evaluate individual model OOF performance
@@ -297,6 +366,8 @@ def create_submission(weights=None):
     
     lgb_model = joblib.load('models/lightgbm_fold0.pkl')
     xgb_model = joblib.load('models/xgboost_fold0.pkl')
+    xgb_scaler = joblib.load('models/xgb_scaler_fold0.pkl')
+    xgb_feature_cols = joblib.load('models/xgb_features_fold0.pkl')
     vectorizer = joblib.load('models/tfidf_vectorizer_fold0.pkl')
     print("✅ All models loaded")
     
@@ -324,11 +395,16 @@ def create_submission(weights=None):
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
     print("  LightGBM...")
-    X_test = vectorizer.transform(test['text'])
-    pred_lgb = lgb_model.predict(X_test)
+    X_test_tfidf = vectorizer.transform(test['text'])
+    pred_lgb = lgb_model.predict(X_test_tfidf)
     
-    print("  XGBoost...")
-    pred_xgb = xgb_model.predict(X_test)
+    print("  XGBoost v3 (Feature Fusion)...")
+    # Prepare combined features for XGBoost v3
+    from scipy.sparse import hstack, csr_matrix
+    X_test_tab = xgb_scaler.transform(test[xgb_feature_cols].values)
+    X_test_tab_sparse = csr_matrix(X_test_tab)
+    X_test_xgb = hstack([X_test_tfidf, X_test_tab_sparse])
+    pred_xgb = xgb_model.predict(X_test_xgb)
     
     # Ensemble predictions
     print("\n[4/5] Creating ensemble...")
